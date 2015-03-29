@@ -21,7 +21,7 @@ class CopyAPI:
     headers = {'X-Client-Type': 'api', 'X-Api-Version': '1', "Content-type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
 
     def __init__(self, username, password):
-        self.auth_token = ''
+	self.auth_token = ''
         self.tree_children = {}
         self.tree_expire = {}
         self.httpconn = urllib3.connection_from_url("https://api.copy.com", block=True, maxsize=1)
@@ -43,11 +43,11 @@ class CopyAPI:
             return response.data
 
     def copyrequest(self, uri, data, return_json=True):
-        headers = self.headers
+	headers = self.headers
         if self.auth_token != '':
             headers['X-Authorization'] = self.auth_token
         response = self.httpconn.request_encode_body("POST", uri, {'data': json.dumps(data)}, headers, False)
-        if return_json == True:
+	if return_json == True:
             return json.loads(response.data, 'latin-1')
         else:
             return response.data
@@ -92,8 +92,15 @@ class CopyAPI:
         response = self.copyrequest('/list_objects', data)
         if 'children' not in response:
             raise FuseOSError(EIO)
-
-        # build tree
+	
+	print "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLSSSSSSSSSSSSSSSSS"
+	print json.dumps(response)
+        print "ENDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
+	#print response
+	#print "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKk"
+	# build tree
+	#print response['revisions'][0]
+	#self.getPart(response['parts'][0]['fingeerprint'],response['parts'][0]['size'])
         self.tree_children[path] = {}
         for child in response['children']:
             name = os.path.basename(child['path']).encode('utf8')
@@ -109,6 +116,92 @@ class CopyAPI:
 
         return self.tree_children[path]
 
+    def listPath(self,path):
+	data = {'path': path, 'max_items': 1000000, 'include_parts': 'true', 'list_watermark': 0 }
+	response = self.copyrequest('/list_objects', data)
+	print response
+	if 'children' not in response:	
+	   raise FuseOSError(EIO)
+	
+	#if not response['children']:
+	#   return response['children']
+	#else:
+	#   print "OBBBJECTTT"
+	return response['object']
+    
+    def getFile(self, path):
+	#f = tempfile.NamedTemporaryFile(delete=False)
+	files = self.listPath(path)
+	for part in files['revisions'][0]['parts']:
+	    data = self.getPart(part['fingerprint'], part['size'])
+	#    f.write(data)
+	#f.close()
+	return 0
+		
+    def getPart(self, fingerprint, size, shareId = 0):
+	headers = {'X-Client-Type': 'api', 'X-Api-Version': '1', "Content-type": "application/octet-stream"}
+	if self.auth_token != '':
+	    headers['X-Authorization'] = self.auth_token
+
+	data = {'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size}]}
+	request = {'jsonrpc': 2.0, 'id': 0, 'method': 'get_object_parts_v2', 'params': data}
+	#response = self.copyrequest('/get_object_parts_v2', data, False)
+	response = self.httpconn.urlopen("POST", '/jsonrpc_binary',  json.dumps(request), headers)
+	print "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+	null_offset = response.data.find(chr(0)) 
+
+	#print response.data[:null_offset]
+	return response.data[null_offset+1:]
+
+    def fingerprint(self, data):
+	return hashlib.md5(data).hexdigest() + hashlib.sha1(data).hexdigest()
+
+    def sendData(self, data, shareId = 0):
+	fingerprint = self.fingerprint(data)
+	part_size = len(data)
+	if not self.hasPart(fingerprint, part_size, shareId):
+	    print "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ"
+	    self.sendPart(fingerprint, part_size, data, shareId)
+
+	return 0 #need to see what to return here
+
+    def sendPart(self, fingerprint, size, data, shareId = 0):
+	if self.fingerprint(data) != fingerprint:
+	    #throw new \Exception("Failed to validate part hash");
+	    return FuseOSError(EIO)
+	
+	headers = {'X-Client-Type': 'api', 'X-Api-Version': '1', "Content-type": "application/octet-stream"}
+	if self.auth_token != '':
+	    headers['X-Authorization'] = self.auth_token	
+
+	payload = [{'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size, 'data': 'BinaryData-0-' +str(size)}]}]
+	request = {'jsonrpc': 2.0, 'id': 0, 'method': 'send_object_parts_v2', 'params': {'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size, 'data': 'BinaryData-0-' +str(size)}]}}
+	print json.dumps(request)
+	#response = self.copyrequest('/send_object_parts_v2', payload+chr(0)+data)
+	response = self.httpconn.urlopen("POST", '/jsonrpc_binary', json.dumps(request)+chr(0)+data, headers)
+	print "SEEEEEEEEEEEEEEEEEEEEENDDDDDDDDDDDDDDD"
+	print response.data
+	#print self.encodeRequest('send_object_parts_v2', payload)
+	print "ENDDDDSENNDDDDDDDDDDDDD"
+	return 0
+    
+    def encodeRequest(self, method, json):
+	request = {'jsonrpc': 2.0, 'id': 0, 'method': method, 'params': json}
+	return json.dumps(request)
+    def hasPart(self, fingerprint, size, shareId = 0):
+	data = {'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size}]}
+	response = self.copyrequest('/has_object_parts_v2', data)
+	print "CCC"
+	if not response['needed_parts']:	#Check that needed parts is empty
+	    return True
+	else:
+	    part = response['needed_parts'][0]
+	    return False
+	     #if part['message']:
+	        #throw new \Exception("Error checking for part: " . $part->message)
+		#raise FuseOSError(EIO)
+            #else:
+		#return False
     def partify(self, f, size):
         parts = {}
 
@@ -276,8 +369,11 @@ class CopyFUSE(LoggingMixIn, Operations):
  	self.copy_api.tree_children[os.path.dirname(path)][name] = {'name': name, 'type': 'dir', 'size': 0, 'ctime': time.time(), 'mtime': time.time()}
 
     def open(self, path, flags):
-        # print "open: " + path
-        self.file_get(path)
+        print "OPPPPPPENNN"
+	print path
+	#result = self.copy_api.getFile(path)
+        print "ENDDDDDDDDDDDDOPPPENNNN"
+	#self.file_get(path)
         return 0
 
     def flush(self, path, fh):
@@ -297,10 +393,17 @@ class CopyFUSE(LoggingMixIn, Operations):
         self.file_close(path)
 
     def read(self, path, size, offset, fh):
-        f = self.file_get(path)['object']
-        f.seek(offset)
-        return f.read(size)
-
+        #f = self.file_get(path)['object']
+        #f.seek(offset)
+        #return f.read(size)
+	print "STARTREAD"
+	print path
+	print size
+	print offset
+	print fh
+	print "REEEEADDDDDDDDDDDDDDDDDDDDDD"
+	return 0
+	
     def readdir(self, path, fh):
         # print "readdir: " + path
         objects = self.copy_api.list_objects(path)
@@ -343,12 +446,14 @@ class CopyFUSE(LoggingMixIn, Operations):
         self.copy_api.copyrequest("/update_objects", params, False)
 
     def write(self, path, data, offset, fh):
-        fileObject = self.file_get(path)
-        f = fileObject['object']
-        f.seek(offset)
-        f.write(data)
-        fileObject['modified'] = True
-        return len(data)
+        #fileObject = self.file_get(path)
+        #f = fileObject['object']
+        #f.seek(offset)
+        #f.write(data)
+        #fileObject['modified'] = True
+        #return len(data)
+	print "WRTTEEEEEEEEEEEEEEEEEEEE"
+	return 0
 
     # Disable unused operations:
     access = None
