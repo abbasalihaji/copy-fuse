@@ -160,7 +160,7 @@ class CopyAPI:
 	#print "LOCAL PATH + " + fileCache.localPath
 	#print "ReadingOffset =" + str(offset)
 	#print "ReadingSize = " + str(size)
-	f = open(fileCache.localPath, 'ar')		#Understand pyhton write read params to fix this
+	f = open(fileCache.localPath, 'a+b')		#Understand pyhton write read params to fix this
 	counter = 0
 	while counter < len(fileCache.chunks):
 	    #print "CHUNK"
@@ -180,10 +180,10 @@ class CopyAPI:
 		    logging.debug("Current Chunk Offset = " + str(chunk.offset))
 		    if chunk.isAvailable:
 			logging.debug("Chunk is available, starting offset is " + str(chunk.localoffset))
-			#f.seek(chunk.localoffset)
-			#logging.debug("Current file position = " + f.tell())
-			#temp = f.read(chunk.size)
-			temp = self.getPart(chunk.fingerprint, chunk.size)
+			f.seek(chunk.localoffset)
+			logging.debug("Current file position = " + str(f.tell()))
+			temp = f.read(int(chunk.size))
+			#temp = self.getPart(chunk.fingerprint, chunk.size)
 			logging.debug("Found Chunk. No. of Bytes Read = " +str(len(temp)))
 		    else:
 			temp = self.getPart(chunk.fingerprint, chunk.size)
@@ -493,9 +493,9 @@ class CopyFUSE(LoggingMixIn, Operations):
 	logging.debug("Reading File, Path = " + path)
 	logging.debug("Reasing File, size = " + str(size))
 	logging.debug("Reading File, Offset = " + str(offset))
-	#self.rwlock.acquire()
+	self.rwlock.acquire()
 	data = self.copy_api.makeAvailableForRead(path, size, offset)
-	#self.rwlock.release()
+	self.rwlock.release()
 	#f = open(localPath, 'r+')
 	#f.seek(offset)
 	logging.debug("End Read")
