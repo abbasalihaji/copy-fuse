@@ -7,6 +7,7 @@ from threading import Lock
 from stat import S_IFDIR, S_IFREG
 from sys import argv, exit, stderr
 
+import logging
 import os
 import argparse
 import tempfile
@@ -16,13 +17,17 @@ import hashlib
 import urllib3
 
 from fuse import FUSE, FuseOSError, Operations, LoggingMixIn, fuse_get_context
+from cachemanager import CacheManager, FileCache, Chunk
 
 class CopyAPI:
     headers = {'X-Client-Type': 'api', 'X-Api-Version': '1', "Content-type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
 
     def __init__(self, username, password):
+	logging.basicConfig(filename='/var/lib/plexmediaserver/Library/cfuse.log', filemode='w', level=logging.DEBUG)
+	logging.debug("starting Program")
 	self.auth_token = ''
-        self.tree_children = {}
+        self.cacheManager = CacheManager()
+	self.tree_children = {}
         self.tree_expire = {}
         self.httpconn = urllib3.connection_from_url("https://api.copy.com", block=True, maxsize=1)
         data = {'username': username, 'password' : password}
@@ -116,8 +121,10 @@ class CopyAPI:
 
         return self.tree_children[path]
 
-    def listPath(self,path):
-	data = {'path': path, 'max_items': 1000000, 'include_parts': 'true', 'list_watermark': 0 }
+    def listPath(self,path, additionalOptions = None):
+	data = {'path': path, 'max_items': 1000000, 'list_watermark': 0 }
+	if(additionalOptions):
+	   data.update(additionalOptions)
 	response = self.copyrequest('/list_objects', data)
 	print response
 	if 'children' not in response:	
@@ -130,26 +137,112 @@ class CopyAPI:
 	return response['object']
     
     def getFile(self, path):
-	#f = tempfile.NamedTemporaryFile(delete=False)
-	files = self.listPath(path)
-	for part in files['revisions'][0]['parts']:
-	    data = self.getPart(part['fingerprint'], part['size'])
-	#    f.write(data)
-	#f.close()
+	fileCache = self.cacheManager.findFileByPath(path)
+	if fileCache == -1:#not in cacheManager
+	    f = tempfile.NamedTemporaryFile(delete=False)
+	    additionalOption = {'include_parts': 'true'}
+	    files = self.listPath(path, additionalOption)
+	    latestRev = files['revisions'][0]
+	    fileCache = FileCache(files['path'], f.name, latestRev['size'])
+	    for part in latestRev['parts']:
+    	        chunk = Chunk(part['fingerprint'], part['size'], part['offset'])
+	        fileCache.chunks.append(chunk)
+	        #data = self.getPart(part['fingerprint'], part['size'])
+	        #f.write(data)
+	    self.cacheManager.files.append(fileCache)
+	    f.close()
 	return 0
-		
-    def getPart(self, fingerprint, size, shareId = 0):
+
+    def makeAvailableForRead(self, path, size, offset):
+	logging.debug("Entering MakeAvailableForRead")
+	#print "MAKE AVAILABLE FOR READ"
+	fileCache = self.cacheManager.findFileByPath(path)
+	#print "LOCAL PATH + " + fileCache.localPath
+	#print "ReadingOffset =" + str(offset)
+	#print "ReadingSize = " + str(size)
+	f = open(fileCache.localPath, 'ar')		#Understand pyhton write read params to fix this
+	counter = 0
+	while counter < len(fileCache.chunks):
+	    #print "CHUNK"
+	    #print "OFFSET =" + str(chunk.offset)
+	    #print "SIZE ="   + str(chunk.size)
+	    #print "isAvailable  " + str(chunk.isAvailable)
+	    #if (int(chunk.offset) < int(offset+size)):
+		#print "WORKING OFFSET"
+	    #if (chunk.isAvailable == False):
+		#print "working AVAILBALE"
+	    chunk = fileCache.chunks[counter]
+	    data = ""
+	    if (int(chunk.offset) <= int(offset)) and ((int(chunk.offset) + int(chunk.size)) > int(offset)):	#found chunk between which startoffset lies 
+		logging.debug("Found Starting Chunk")
+		temp = ""
+		while int(chunk.offset) < int(offset) + int(size):
+		    logging.debug("Current Chunk Offset = " + str(chunk.offset))
+		    if chunk.isAvailable:
+			logging.debug("Chunk is available, starting offset is " + str(chunk.localoffset))
+			#f.seek(chunk.localoffset)
+			#logging.debug("Current file position = " + f.tell())
+			#temp = f.read(chunk.size)
+			temp = self.getPart(chunk.fingerprint, chunk.size)
+			logging.debug("Found Chunk. No. of Bytes Read = " +str(len(temp)))
+		    else:
+			temp = self.getPart(chunk.fingerprint, chunk.size)
+			chunk.isAvailable = True
+			f.seek(0,2)
+			chunk.localoffset = f.tell()
+		    	logging.debug("writting to file. Offset equal = " + str(chunk.localoffset))
+			f.write(temp)
+			f.seek(0,2)
+			logging.debug("Finshed Writing End of file offset is " + str(f.tell()))
+		    logging.debug("Got chunk data")
+		    if int(chunk.offset) >= int(offset) and int(chunk.offset)+int(chunk.size) < int(offset)+int(size):
+			logging.debug("Case 1")
+			data += temp
+		    elif int(chunk.offset) <= int(offset) and int(chunk.offset)+int(chunk.size) > int(offset)+int(size):
+			logging.debug("Case 2")
+			data += temp[(int(offset)-int(chunk.offset)):(int(offset)-int(chunk.offset)+int(size))]
+		    elif int(chunk.offset) <= int(offset) and int(chunk.offset)+int(chunk.size) < int(offset)+int(size):
+			logging.debug("Case 3")
+			data += temp[int(offset)-int(chunk.offset):]
+		    else:
+			logging.debug("Case 4")
+			data += temp[:int(offset)+int(size)-int(chunk.offset)]
+		    if counter+1 < len(fileCache.chunks):
+		    	chunk = fileCache.chunks[counter+1]
+		    else:
+			logging.debug("Last Chunk")
+			return data
+		    counter += 1
+		if len(data) != int(size):
+		    logging.debug("ERROR, Did not read correct no. of bytes")
+		    logging.debug("Amount to be read = " + str(size))
+	            logging.debug("Amount read = " + str(len(data)))
+		    return ""
+		else:	
+		    logging.debug("Correct End MakeAvailableForRead")
+		    return data
+	    counter += 1
+	f.close()
+	#print "ENDMAKEAVAILABLEREAD"
+	logging.debug("End MakeAvailableForRead")
+	return data
+
+    def getPart(self, fingerprint, size, shareId = 0): #Currently only doing sequentital reads
 	headers = {'X-Client-Type': 'api', 'X-Api-Version': '1', "Content-type": "application/octet-stream"}
 	if self.auth_token != '':
 	    headers['X-Authorization'] = self.auth_token
-
+	
 	data = {'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size}]}
 	request = {'jsonrpc': 2.0, 'id': 0, 'method': 'get_object_parts_v2', 'params': data}
 	#response = self.copyrequest('/get_object_parts_v2', data, False)
 	response = self.httpconn.urlopen("POST", '/jsonrpc_binary',  json.dumps(request), headers)
-	print "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+	#logging.debug("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
 	null_offset = response.data.find(chr(0)) 
-
+	binary = response.data[null_offset+1:]
+	if len(binary) != int(size):
+	    #print "LENGTH + " + str(len(binary))
+	    #print "SIZE " + str(size)
+	    return FuseOSError(EIO)
 	#print response.data[:null_offset]
 	return response.data[null_offset+1:]
 
@@ -243,7 +336,7 @@ class CopyFUSE(LoggingMixIn, Operations):
             raw = ''
 
         f = tempfile.NamedTemporaryFile(delete=False)
-        f.write(raw)
+        #f.write(raw)
         self.files[path] = {'object': f, 'modified': False}
 
         # print "opening: " + path
@@ -369,10 +462,10 @@ class CopyFUSE(LoggingMixIn, Operations):
  	self.copy_api.tree_children[os.path.dirname(path)][name] = {'name': name, 'type': 'dir', 'size': 0, 'ctime': time.time(), 'mtime': time.time()}
 
     def open(self, path, flags):
-        print "OPPPPPPENNN"
-	print path
-	#result = self.copy_api.getFile(path)
-        print "ENDDDDDDDDDDDDOPPPENNNN"
+        logging.debug("Open File. Path = " + path)
+	logging.debug(path)
+	result = self.copy_api.getFile(path)
+        logging.debug("End Open")
 	#self.file_get(path)
         return 0
 
@@ -396,13 +489,19 @@ class CopyFUSE(LoggingMixIn, Operations):
         #f = self.file_get(path)['object']
         #f.seek(offset)
         #return f.read(size)
-	print "STARTREAD"
-	print path
-	print size
-	print offset
-	print fh
-	print "REEEEADDDDDDDDDDDDDDDDDDDDDD"
-	return 0
+	logging.debug("Start Read")
+	logging.debug("Reading File, Path = " + path)
+	logging.debug("Reasing File, size = " + str(size))
+	logging.debug("Reading File, Offset = " + str(offset))
+	#self.rwlock.acquire()
+	data = self.copy_api.makeAvailableForRead(path, size, offset)
+	#self.rwlock.release()
+	#f = open(localPath, 'r+')
+	#f.seek(offset)
+	logging.debug("End Read")
+	#data = f.read(size)
+	#f.close()
+	return data
 	
     def readdir(self, path, fh):
         # print "readdir: " + path
