@@ -23,7 +23,8 @@ class CopyAPI:
     headers = {'X-Client-Type': 'api', 'X-Api-Version': '1', "Content-type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
 
     def __init__(self, username, password):
-	logging.basicConfig(filename='/var/lib/plexmediaserver/Library/cfuse.log', filemode='w', level=logging.DEBUG)
+	#logging.basicConfig(filename='/var/lib/plexmediaserver/Library/cfuse.log', filemode='w', level=logging.DEBUG)
+	logging.basicConfig(filename='/var/lib/plexmediaserver/Library/cfuse.log', filemode='w')
 	logging.debug("starting Program")
 	self.auth_token = ''
         self.cacheManager = CacheManager()
@@ -57,34 +58,6 @@ class CopyAPI:
         else:
             return response.data
 
-    def part_request(self, method, parts, data=None):
-        headers = self.headers
-        headers['X-Part-Count'] = len(parts)
-
-        payload = ''
-
-        for i in range(0, len(parts)):
-            part_num = str(i + 1)
-            headers['X-Part-Fingerprint-' + part_num] = parts[i]['fingerprint']
-            headers['X-Part-Size-' + part_num] = parts[i]['size']
-            headers['X-Part-Share-' + part_num] = 0
-
-            if method == 'send_parts':
-                payload = payload + parts[i]['data']
-
-        # authentication http headers
-        if self.auth_token != '':
-            headers['X-Authorization'] = self.auth_token
-
-        # print headers
-
-        if method == 'has_parts':
-            response = self.httpconn.request_encode_body("POST", "/" + method, {'data': json.dumps(data)}, headers, False)
-        else:
-            response = self.httpconn.urlopen("POST", "/" + method, payload, headers)
-
-        return json.loads(response.data, 'latin-1')
-
     def list_objects(self, path, ttl=10):
         # check cache
         if path in self.tree_expire:
@@ -98,14 +71,7 @@ class CopyAPI:
         if 'children' not in response:
             raise FuseOSError(EIO)
 	
-	print "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLSSSSSSSSSSSSSSSSS"
-	print json.dumps(response)
-        print "ENDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
-	#print response
-	#print "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKk"
 	# build tree
-	#print response['revisions'][0]
-	#self.getPart(response['parts'][0]['fingeerprint'],response['parts'][0]['size'])
         self.tree_children[path] = {}
         for child in response['children']:
             name = os.path.basename(child['path']).encode('utf8')
@@ -126,15 +92,17 @@ class CopyAPI:
 	if(additionalOptions):
 	   data.update(additionalOptions)
 	response = self.copyrequest('/list_objects', data)
-	print response
-	if 'children' not in response:	
-	   raise FuseOSError(EIO)
+
+	if not 'children' in response:	
+	    logging.debug("Object has no children")
+	    raise FuseOSError(EIO)
 	
-	#if not response['children']:
-	#   return response['children']
-	#else:
-	#   print "OBBBJECTTT"
-	return response['object']
+	if len(response['children']) != 0:
+	    logging.debug("Returning Children, No. of Children is  " + str(len(response['children'])))
+	    return response['children']
+	else:
+	    logging.debug("returning object")
+	    return response['object']
     
     def getFile(self, path):
 	fileCache = self.cacheManager.findFileByPath(path)
@@ -147,35 +115,39 @@ class CopyAPI:
 	    for part in latestRev['parts']:
     	        chunk = Chunk(part['fingerprint'], part['size'], part['offset'])
 	        fileCache.chunks.append(chunk)
-	        #data = self.getPart(part['fingerprint'], part['size'])
-	        #f.write(data)
 	    self.cacheManager.files.append(fileCache)
 	    f.close()
 	return 0
 
     def makeAvailableForRead(self, path, size, offset):
 	logging.debug("Entering MakeAvailableForRead")
-	#print "MAKE AVAILABLE FOR READ"
+	
 	fileCache = self.cacheManager.findFileByPath(path)
-	#print "LOCAL PATH + " + fileCache.localPath
-	#print "ReadingOffset =" + str(offset)
-	#print "ReadingSize = " + str(size)
+	if fileCache == -1:
+	    getFile(self,path)
+	    fileCache = self.cacheManager.findFileByPath(path)
+	    if fileCache == -1:
+		raise FuseOSError(EIO)
+
 	f = open(fileCache.localPath, 'a+b')		#Understand pyhton write read params to fix this
 	counter = 0
 	while counter < len(fileCache.chunks):
-	    #print "CHUNK"
-	    #print "OFFSET =" + str(chunk.offset)
-	    #print "SIZE ="   + str(chunk.size)
-	    #print "isAvailable  " + str(chunk.isAvailable)
-	    #if (int(chunk.offset) < int(offset+size)):
-		#print "WORKING OFFSET"
-	    #if (chunk.isAvailable == False):
-		#print "working AVAILBALE"
+	    
 	    chunk = fileCache.chunks[counter]
 	    data = ""
 	    if (int(chunk.offset) <= int(offset)) and ((int(chunk.offset) + int(chunk.size)) > int(offset)):	#found chunk between which startoffset lies 
+		#I am confident enough that every read 
 		logging.debug("Found Starting Chunk")
 		temp = ""
+		currentChunk = counter
+		bufferBlockSize = 5
+		for i in range(0,bufferBlockSize):
+		    if i+currentChunk < len(fileCache.chunks):
+                        if fileCache.chunks[i+currentChunk].isAvailable == False:
+			    f.seek(0,2)
+			    fileCache.chunks[i+currentChunk].localoffset = f.tell()
+			    f.write(self.getPart(fileCache.chunks[i+currentChunk].fingerprint, fileCache.chunks[i+currentChunk].size))
+			    fileCache.chunks[i+currentChunk].isAvailable = True 
 		while int(chunk.offset) < int(offset) + int(size):
 		    logging.debug("Current Chunk Offset = " + str(chunk.offset))
 		    if chunk.isAvailable:
@@ -183,7 +155,6 @@ class CopyAPI:
 			f.seek(chunk.localoffset)
 			logging.debug("Current file position = " + str(f.tell()))
 			temp = f.read(int(chunk.size))
-			#temp = self.getPart(chunk.fingerprint, chunk.size)
 			logging.debug("Found Chunk. No. of Bytes Read = " +str(len(temp)))
 		    else:
 			temp = self.getPart(chunk.fingerprint, chunk.size)
@@ -201,7 +172,7 @@ class CopyAPI:
 		    elif int(chunk.offset) <= int(offset) and int(chunk.offset)+int(chunk.size) > int(offset)+int(size):
 			logging.debug("Case 2")
 			data += temp[(int(offset)-int(chunk.offset)):(int(offset)-int(chunk.offset)+int(size))]
-		    elif int(chunk.offset) <= int(offset) and int(chunk.offset)+int(chunk.size) < int(offset)+int(size):
+		    elif int(chunk.offset) <= int(offset) and int(chunk.offset)+int(chunk.size) <= int(offset)+int(size):
 			logging.debug("Case 3")
 			data += temp[int(offset)-int(chunk.offset):]
 		    else:
@@ -223,28 +194,44 @@ class CopyAPI:
 		    return data
 	    counter += 1
 	f.close()
-	#print "ENDMAKEAVAILABLEREAD"
+	
 	logging.debug("End MakeAvailableForRead")
 	return data
 
-    def getPart(self, fingerprint, size, shareId = 0): #Currently only doing sequentital reads
-	headers = {'X-Client-Type': 'api', 'X-Api-Version': '1', "Content-type": "application/octet-stream"}
-	if self.auth_token != '':
-	    headers['X-Authorization'] = self.auth_token
-	
+    def getPart(self, fingerprint, size, shareId = 0): 
 	data = {'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size}]}
-	request = {'jsonrpc': 2.0, 'id': 0, 'method': 'get_object_parts_v2', 'params': data}
-	#response = self.copyrequest('/get_object_parts_v2', data, False)
-	response = self.httpconn.urlopen("POST", '/jsonrpc_binary',  json.dumps(request), headers)
-	#logging.debug("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
-	null_offset = response.data.find(chr(0)) 
-	binary = response.data[null_offset+1:]
+
+	response = self.post('get_object_parts_v2', self.encodeRequest('get_object_parts_v2', data))
+	
+	null_offset = response.find(chr(0)) 
+	binary = ""
+	binary = response[null_offset+1:]
+
+	res = ""
+	if len(binary) > 0:
+	    res = response[:null_offset]
+	else:
+	    res = response
+
+	if len(res) <= 0:
+	    logging.debug("Error getting part data")
+	    raise FuseOSError(EIO)
+	
+	result = json.loads(res)
+	
+	if 'error' in result:
+	    logging.debug('Error Getting Part')
+	    raise FuseOSError(EIO)
+	
+	if 'message' in result['result']['parts'][0]:
+	    logging.debug('Error Getting Part. Error message = ' + result['result']['parts'][0]['message'])
+	    raise FuseOSError(EIO)
+	
 	if len(binary) != int(size):
-	    #print "LENGTH + " + str(len(binary))
-	    #print "SIZE " + str(size)
-	    return FuseOSError(EIO)
-	#print response.data[:null_offset]
-	return response.data[null_offset+1:]
+	    logging.debug('Error getting part data. Expected size = ' + str(len(size)) + ' and size of data received = ' + str(len(binary)))
+	    raise FuseOSError(EIO)
+
+	return binary
 
     def fingerprint(self, data):
 	return hashlib.md5(data).hexdigest() + hashlib.sha1(data).hexdigest()
@@ -253,66 +240,70 @@ class CopyAPI:
 	fingerprint = self.fingerprint(data)
 	part_size = len(data)
 	if not self.hasPart(fingerprint, part_size, shareId):
-	    print "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ"
 	    self.sendPart(fingerprint, part_size, data, shareId)
 
-	return 0 #need to see what to return here
+	return {'fingerprint': fingerprint, 'size': size}
+
+    def post(self, method, data, decodeResponse = False):
+	headers = {'X-Client-Type': 'api', 'X-Api-Version': '1', "Content-type": "application/octet-stream"} #make this a class field later on
+	if self.auth_token != '':
+	    headers['X-Authorization'] = self.auth_token
+	
+	if (method == 'get_object_parts_v2') or (method == 'has_object_parts_v2') or (method == 'send_object_parts_v2'):
+	    headers['Content-type'] = 'application/octet-stream'
+	else:
+	    headers['Content-type'] = 'application/x-www-form-urlencoded'
+
+	response = self.httpconn.urlopen("POST", self.getEndPoint(method),  data, headers)
+
+	if decodeResponse:
+	    return json.loads(response.data, 'latin-1')
+	else:
+	    return response.data
+
+    def getEndPoint(self, method):
+	if (method == 'get_object_parts_v2') or (method == 'has_object_parts_v2') or (method == 'send_object_parts_v2'):
+	    return '/jsonrpc_binary'
+	elif (method == 'update_objects') or (method == 'list_objects'):
+	    return '/jsonrpc'
+	else:
+	    return '/rest/' + method
 
     def sendPart(self, fingerprint, size, data, shareId = 0):
-	if self.fingerprint(data) != fingerprint:
-	    #throw new \Exception("Failed to validate part hash");
-	    return FuseOSError(EIO)
+	if hashlib.md5(data).hexdigest() + hashlib.sha1(data).hexdigest() != fingerprint:
+	    logging.debug("ERROR, Failed to validate part hash")
+	    raise FuseOSError(EIO)
 	
-	headers = {'X-Client-Type': 'api', 'X-Api-Version': '1', "Content-type": "application/octet-stream"}
-	if self.auth_token != '':
-	    headers['X-Authorization'] = self.auth_token	
+	payload = {'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size, 'data': 'BinaryData-0-' +str(size)}]}
+	response = self.post('send_object_parts_v2', self.encodeRequest('send_object_parts_v2', payload)+chr(0)+data, True)
+#	request = {'jsonrpc': 2.0, 'id': 0, 'method': 'send_object_parts_v2', 'params': {'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size, 'data': 'BinaryData-0-' +str(size)}]}}
 
-	payload = [{'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size, 'data': 'BinaryData-0-' +str(size)}]}]
-	request = {'jsonrpc': 2.0, 'id': 0, 'method': 'send_object_parts_v2', 'params': {'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size, 'data': 'BinaryData-0-' +str(size)}]}}
-	print json.dumps(request)
-	#response = self.copyrequest('/send_object_parts_v2', payload+chr(0)+data)
-	response = self.httpconn.urlopen("POST", '/jsonrpc_binary', json.dumps(request)+chr(0)+data, headers)
-	print "SEEEEEEEEEEEEEEEEEEEEENDDDDDDDDDDDDDDD"
-	print response.data
-	#print self.encodeRequest('send_object_parts_v2', payload)
-	print "ENDDDDSENNDDDDDDDDDDDDD"
+#	response = self.httpconn.urlopen("POST", '/jsonrpc_binary', json.dumps(request)+chr(0)+data, headers)
+
+	if 'has_failed_parts' in response['result']:
+	     logginf.debug("ERROR, Error sending part: " + response['result']['failed_parts'][0]['message'])
+	     raise FuseOSError(EIO)
+
 	return 0
     
-    def encodeRequest(self, method, json):
-	request = {'jsonrpc': 2.0, 'id': 0, 'method': method, 'params': json}
+    def encodeRequest(self, method, param):
+	request = {'jsonrpc': 2.0, 'id': 0, 'method': method, 'params': param}
 	return json.dumps(request)
+
     def hasPart(self, fingerprint, size, shareId = 0):
 	data = {'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size}]}
-	response = self.copyrequest('/has_object_parts_v2', data)
-	print "CCC"
-	if not response['needed_parts']:	#Check that needed parts is empty
+	response = self.post('has_object_parts_v2', self.encodeRequest('has_object_parts_v2', data), True)
+	if not 'needed_parts' in response['result']:	#Check that needed parts is empty
 	    return True
 	else:
-	    part = response['needed_parts'][0]
-	    return False
-	     #if part['message']:
+	    part = response['result']['needed_parts'][0]
+	    if 'message' in part and len(part['message']) > 0:
 	        #throw new \Exception("Error checking for part: " . $part->message)
-		#raise FuseOSError(EIO)
-            #else:
-		#return False
-    def partify(self, f, size):
-        parts = {}
+		logging.debug("ERROR: Has Part, Error Message = " + part['message'])
+		raise FuseOSError(EIO)
+            else:
+		return False
 
-        part_num = 0
-        offset = 0
-        while f.tell() < size:
-            # obtain the part data
-            offset = f.tell()
-            part_data = f.read(1048576)
-            parts[part_num] = {'fingerprint': hashlib.md5(part_data).hexdigest() + hashlib.sha1(part_data).hexdigest(), 'offset': offset, 'size': len(part_data), 'data': part_data}
-            offset = f.tell()
-            part_num += 1
-
-        if size != offset:
-            # print str(size) + " != " + str(offset)
-            raise FuseOSError(EIO)
-
-        return parts
 
 class CopyFUSE(LoggingMixIn, Operations):
     def __init__(self, username, password, logfile=None):
@@ -462,11 +453,11 @@ class CopyFUSE(LoggingMixIn, Operations):
  	self.copy_api.tree_children[os.path.dirname(path)][name] = {'name': name, 'type': 'dir', 'size': 0, 'ctime': time.time(), 'mtime': time.time()}
 
     def open(self, path, flags):
+	logging.debug("Enter Fuse Open Function")
         logging.debug("Open File. Path = " + path)
 	logging.debug(path)
 	result = self.copy_api.getFile(path)
         logging.debug("End Open")
-	#self.file_get(path)
         return 0
 
     def flush(self, path, fh):
@@ -486,9 +477,6 @@ class CopyFUSE(LoggingMixIn, Operations):
         self.file_close(path)
 
     def read(self, path, size, offset, fh):
-        #f = self.file_get(path)['object']
-        #f.seek(offset)
-        #return f.read(size)
 	logging.debug("Start Read")
 	logging.debug("Reading File, Path = " + path)
 	logging.debug("Reasing File, size = " + str(size))
@@ -496,11 +484,7 @@ class CopyFUSE(LoggingMixIn, Operations):
 	self.rwlock.acquire()
 	data = self.copy_api.makeAvailableForRead(path, size, offset)
 	self.rwlock.release()
-	#f = open(localPath, 'r+')
-	#f.seek(offset)
 	logging.debug("End Read")
-	#data = f.read(size)
-	#f.close()
 	return data
 	
     def readdir(self, path, fh):
@@ -545,13 +529,16 @@ class CopyFUSE(LoggingMixIn, Operations):
         self.copy_api.copyrequest("/update_objects", params, False)
 
     def write(self, path, data, offset, fh):
-        #fileObject = self.file_get(path)
+        logging.debug("Enter Fuse Write Function")
+	logging.debug("Write, Path = " + path)
+	logging.debug("Write, Offset = " + str(offset))
+	#fileObject = self.file_get(path)
         #f = fileObject['object']
         #f.seek(offset)
         #f.write(data)
         #fileObject['modified'] = True
         #return len(data)
-	print "WRTTEEEEEEEEEEEEEEEEEEEE"
+	#print "WRTTEEEEEEEEEEEEEEEEEEEE"
 	return 0
 
     # Disable unused operations:
