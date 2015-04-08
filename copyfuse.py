@@ -3,10 +3,10 @@
 from __future__ import with_statement
 
 from errno import EACCES, ENOENT, EIO, EPERM
-from threading import Lock
+from threading import Lock,Thread
 from stat import S_IFDIR, S_IFREG
 from sys import argv, exit, stderr
-
+import Queue
 import logging
 import os
 import argparse
@@ -17,14 +17,14 @@ import hashlib
 import urllib3
 
 from fuse import FUSE, FuseOSError, Operations, LoggingMixIn, fuse_get_context
-from cachemanager import CacheManager, FileCache, Chunk
+from cachemanager import CacheManager, FileCache, Chunk, CQueue
 
 class CopyAPI:
     headers = {'X-Client-Type': 'api', 'X-Api-Version': '1', "Content-type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
 
     def __init__(self, username, password):
-	#logging.basicConfig(filename='/var/lib/plexmediaserver/Library/cfuse.log', filemode='w', level=logging.DEBUG)
-	logging.basicConfig(filename='/var/lib/plexmediaserver/Library/cfuse.log', filemode='w')
+	logging.basicConfig(filename='/var/lib/plexmediaserver/Library/cfuse.log', filemode='w', level=logging.DEBUG)
+	#logging.basicConfig(filename='/var/lib/plexmediaserver/Library/cfuse.log', filemode='w')
 	logging.debug("starting Program")
 	self.auth_token = ''
         self.cacheManager = CacheManager()
@@ -37,7 +37,17 @@ class CopyAPI:
             raise FuseOSError(EPERM)
         else:
             self.auth_token = response['auth_token'].encode('ascii','ignore')
-
+	self.rwlock = Lock()
+	self.crtchunk = -1
+	self.queue = CQueue(10)
+	self.jobqueue = Queue.Queue()
+	#try:
+	#t = Thread(target=self.getBufferParts)
+	#t.start()
+	#except ValueError:
+	#    logging.debug("ERROR, Thread")
+	
+	
     def copygetrequest(self, uri, data, return_json=True):
         headers = self.headers
         if self.auth_token != '':
@@ -119,6 +129,19 @@ class CopyAPI:
 	    f.close()
 	return 0
 
+    def getBufferParts(self):
+	while True:
+	    if self.jobqueue.empty() == False:
+	    	job = self.jobqueue.get()
+	    	currentChunk = job['currentChunk']
+	    	fileCache = job ['fileCache']
+	    	logging.debug("Entering Get Buffer Parts")
+	    	if 10+currentChunk < len(fileCache.chunks):
+	    #self.rwlock.acquire()
+	           self.queue.put({'offset': fileCache.chunks[10+currentChunk].offset, 'data' : self.getPart(fileCache.chunks[10+currentChunk].fingerprint, fileCache.chunks[10+currentChunk].size)})
+	    #self.rwlock.release()
+	    	logging.debug("Exiting Get Buffer Part")
+
     def makeAvailableForRead(self, path, size, offset):
 	logging.debug("Entering MakeAvailableForRead")
 	
@@ -130,7 +153,29 @@ class CopyAPI:
 		raise FuseOSError(EIO)
 
 	f = open(fileCache.localPath, 'a+b')		#Understand pyhton write read params to fix this
-	counter = 0
+	if self.crtchunk == -1:
+	    t = Thread(target=self.getBufferParts)
+	    t.start()
+	    counter = 0
+	elif self.crtchunk < len(fileCache.chunks):
+	    if int(fileCache.chunks[self.crtchunk].offset) <= int(offset) and int(fileCache.chunks[self.crtchunk].offset) + int(fileCache.chunks[self.crtchunk].size) > int(offset):
+	       counter = self.crtchunk
+	    else:
+		counter = 0
+	elif self.crtchunk+1 < len(fileCache.chunks): 
+	    if int(fileCache.chunks[self.crtchunk+1].offset) <= int(offset) and int(fileCache.chunks[self.crtchunk+1].offset) + int(fileCache.chunks[self.crtchunk+1].size) > int(offset):
+		counter = self.crtchunk+1
+		self.queue.get()
+		#t = Thread(target=self.getBufferParts, args=(self.crtchunk+1,fileCache,))
+		#t.start()
+		#self.getBufferParts(self.crtchunk+1,fileCache)
+		self.jobqueue.put({'currentChunk': self.crtchunk+1, 'fileCache': fileCache})
+		self.crtchunk +=1
+		#remove first element of queue	
+	    else:
+		counter = 0
+	else:
+		counter = 0
 	while counter < len(fileCache.chunks):
 	    
 	    chunk = fileCache.chunks[counter]
@@ -139,45 +184,75 @@ class CopyAPI:
 		#I am confident enough that every read 
 		logging.debug("Found Starting Chunk")
 		temp = ""
-		currentChunk = counter
-		bufferBlockSize = 5
-		for i in range(0,bufferBlockSize):
-		    if i+currentChunk < len(fileCache.chunks):
-                        if fileCache.chunks[i+currentChunk].isAvailable == False:
-			    f.seek(0,2)
-			    fileCache.chunks[i+currentChunk].localoffset = f.tell()
-			    f.write(self.getPart(fileCache.chunks[i+currentChunk].fingerprint, fileCache.chunks[i+currentChunk].size))
-			    fileCache.chunks[i+currentChunk].isAvailable = True 
 		while int(chunk.offset) < int(offset) + int(size):
-		    logging.debug("Current Chunk Offset = " + str(chunk.offset))
-		    if chunk.isAvailable:
-			logging.debug("Chunk is available, starting offset is " + str(chunk.localoffset))
-			f.seek(chunk.localoffset)
-			logging.debug("Current file position = " + str(f.tell()))
-			temp = f.read(int(chunk.size))
-			logging.debug("Found Chunk. No. of Bytes Read = " +str(len(temp)))
+		    #logging.debug("Current Chunk Offset = " + str(chunk.offset))
+		    #if chunk.isAvailable:
+		    if self.crtchunk == counter:
+			    #t = Thread(target=self.getBufferParts, args=(counter, fileCache,))
+			    #t.start()
+			self.crtchunk = counter
+			logging.debug("In the same chunk")
+		    elif self.crtchunk == counter+1 and counter != 0:
+			logging.debug("Start Following Chunk")
+			self.queue.get()
+			#t = Thread(target=self.getBufferParts, args=(self.crtchunk+1,fileCache,))
+			#t.start()
+			self.jobqueue.put({'currentChunk': self.crtchunk+1, 'fileCache': fileCache})
+			#self.getBufferParts(self.crtchunk+1,fileCache)
+			self.crtchunk = counter+1
+			#remove first element 
+			logging.debug("End following chunk")
+			#spawn thread
 		    else:
-			temp = self.getPart(chunk.fingerprint, chunk.size)
-			chunk.isAvailable = True
-			f.seek(0,2)
-			chunk.localoffset = f.tell()
-		    	logging.debug("writting to file. Offset equal = " + str(chunk.localoffset))
-			f.write(temp)
-			f.seek(0,2)
-			logging.debug("Finshed Writing End of file offset is " + str(f.tell()))
-		    logging.debug("Got chunk data")
+			logging.debug("Entering first time chucnk")
+			self.crtchunk = counter
+			currentChunk = counter
+			bufferBlockSize = 11
+			self.jobqueue.queue.clear()
+			self.queue.clear()
+			for i in range(0,bufferBlockSize):
+			    if i+currentChunk < len(fileCache.chunks):
+				if i == 0:
+				   self.queue.currentChunk = {'offset': fileCache.chunks[i+currentChunk].offset, 'data' : self.getPart(fileCache.chunks[i+currentChunk].fingerprint, fileCache.chunks[i+currentChunk].size)}
+				else:
+				   self.queue.put({'offset': fileCache.chunks[i+currentChunk].offset, 'data' : self.getPart(fileCache.chunks[i+currentChunk].fingerprint, fileCache.chunks[i+currentChunk].size)})
+		    	#logging.debug("writting to file. Offset equal = " + str(chunk.localoffset))
+			#f.seek( 0,2)
+			#logging.debug("Finshed Writing End of file offset is " + str(f.tell()))
+			#if self.crtchunk == -1:
+			#    t = Thread(target=self.getBufferParts, args=(counter, fileCache,))
+			#    t.start()
+			#self.crtchunk = counter + 1
+			logging.debug("exiiting first time chunk")
+		    logging.debug("Current Chunk processed = " + str(self.crtchunk))
+		    #logging.debug("Readinf Chunk Offset = " + str(self.queue.currentChunk['offset']))
+		    
 		    if int(chunk.offset) >= int(offset) and int(chunk.offset)+int(chunk.size) < int(offset)+int(size):
 			logging.debug("Case 1")
-			data += temp
+			#f.seek(chunk.localoffset)
+			data += self.queue.currentChunk['data']
 		    elif int(chunk.offset) <= int(offset) and int(chunk.offset)+int(chunk.size) > int(offset)+int(size):
 			logging.debug("Case 2")
-			data += temp[(int(offset)-int(chunk.offset)):(int(offset)-int(chunk.offset)+int(size))]
+			#f.seek(int(chunk.localoffset)+int(offset)-int(chunk.offset))
+			#data += f.read(int(size))
+			data += self.queue.currentChunk['data'][(int(offset)-int(chunk.offset)):(int(offset)-int(chunk.offset)+int(size))]
 		    elif int(chunk.offset) <= int(offset) and int(chunk.offset)+int(chunk.size) <= int(offset)+int(size):
 			logging.debug("Case 3")
-			data += temp[int(offset)-int(chunk.offset):]
+			#f.seek(int(chunk.localoffset)+int(offset)-int(chunk.offset))
+			#data += f.read(int(chunk.size)-(int(offset)-int(chunk.offset)))
+			data += self.queue.currentChunk['data'][int(offset)-int(chunk.offset):]
+			self.queue.get()
+			self.crtchunk +=1
+		        #t = Thread(target=self.getBufferParts, args=(self.crtchunk+1,fileCache,))
+			#t.start()
+			self.jobqueue.put({'currentChunk': self.crtchunk, 'fileCache': fileCache})
+			#self.getBufferParts(self.crtchunk,fileCache)
+			
 		    else:
 			logging.debug("Case 4")
-			data += temp[:int(offset)+int(size)-int(chunk.offset)]
+			f.seek(int(chunk.localoffset))
+			#data += f.read(int(offset)+int(size)-int(chunk.offset))
+			data += self.queue.currentChunk['data'][:int(offset)+int(size)-int(chunk.offset)]
 		    if counter+1 < len(fileCache.chunks):
 		    	chunk = fileCache.chunks[counter+1]
 		    else:
@@ -189,11 +264,12 @@ class CopyAPI:
 		    logging.debug("Amount to be read = " + str(size))
 	            logging.debug("Amount read = " + str(len(data)))
 		    return ""
-		else:	
-		    logging.debug("Correct End MakeAvailableForRead")
+		else:
+		    #logging.debug("Found Chunk. No. of Bytes Read = " +str(len(data)))	
+		    #logging.debug("Correct End MakeAvailableForRead")
 		    return data
 	    counter += 1
-	f.close()
+	#f.close()
 	
 	logging.debug("End MakeAvailableForRead")
 	return data
@@ -481,9 +557,9 @@ class CopyFUSE(LoggingMixIn, Operations):
 	logging.debug("Reading File, Path = " + path)
 	logging.debug("Reasing File, size = " + str(size))
 	logging.debug("Reading File, Offset = " + str(offset))
-	self.rwlock.acquire()
+	#self.rwlock.acquire()
 	data = self.copy_api.makeAvailableForRead(path, size, offset)
-	self.rwlock.release()
+	#self.rwlock.release()
 	logging.debug("End Read")
 	return data
 	
