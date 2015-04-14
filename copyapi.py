@@ -41,16 +41,16 @@ class CopyAPI:
             if(additionalOptions):
                 request.update(additionalOptions)
 	        result = self.post('list_objects', self.encodeRequest('list_objects', request), True)
-
-	        if 'children' in result['result'] and len(result['result']['children']) != 0:
-	            logging.debug("Returning Children, No. of Children is  " + str(len(result['result']['children'])))
-	            ret.update(result['result']['children'])
+            print result
+            if 'children' in result['result'] and len(result['result']['children']) != 0:
+                logging.debug("Returning Children, No. of Children is  " + str(len(result['result']['children'])))
+                ret.update(result['result']['children'])
                 list_watermark = result['result']['list_watermark']
             else:
                 logging.debug("returning object")
                 ret.update(result['result']['object'])
 
-            if not ('more_items' in result['result'] and result['result']['more_iems'] == 1):
+            if not ('more_items' in result['result'] and result['result']['more_items'] == 1):
                 break
 
         return ret
@@ -72,13 +72,13 @@ class CopyAPI:
 	    result = self.post('get_object_parts_v2', self.encodeRequest('get_object_parts_v2', request))
 	
 	    null_offset = result.find(chr(0)) 
-	    binary = response[null_offset+1:]
+	    binary = result[null_offset+1:]
 
 	    res = ""
 	    if len(binary) > 0:
-	        res = response[:null_offset]
+	        res = result[:null_offset]
 	    else:
-	        res = response
+	        res = result
 
 	    if len(res) <= 0:
 	        logging.debug("Error getting part data")
@@ -109,7 +109,7 @@ class CopyAPI:
 	    if not self.hasPart(fingerprint, part_size, shareId):
 	        self.sendPart(fingerprint, part_size, data, shareId)
 
-	    return {'fingerprint': fingerprint, 'size': size}
+	    return {'fingerprint': fingerprint, 'size': part_size}
 
     def post(self, method, data, decodeResponse = False):
         headers = self.getHeaders(method)
@@ -153,28 +153,53 @@ class CopyAPI:
             return '/rest/' + method
 
     def sendPart(self, fingerprint, size, data, shareId = 0):
-	    if hashlib.md5(data).hexdigest() + hashlib.sha1(data).hexdigest() != fingerprint:
-	        logging.debug("ERROR, Failed to validate part hash")
-	        raise FuseOSError(EIO)
+        if hashlib.md5(data).hexdigest() + hashlib.sha1(data).hexdigest() != fingerprint:
+            logging.debug("ERROR, Failed to validate part hash")
+            raise FuseOSError(EIO)
 	
-	    request = {'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size, 'data': 'BinaryData-0-' +str(size)}]}
-	    result = self.post('send_object_parts_v2', self.encodeRequest('send_object_parts_v2', request)+chr(0)+data, True)
+        request = {'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size, 'data': 'BinaryData-0-' +str(size)}]}
+        result = self.post('send_object_parts_v2', self.encodeRequest('send_object_parts_v2', request)+chr(0)+data, True)
 
-	    if 'has_failed_parts' in response['result']:
-	        logging.debug("ERROR, Error sending part: " + response['result']['failed_parts'][0]['message'])
-	        raise FuseOSError(EIO)
+        if 'has_failed_parts' in result['result']:
+            logging.debug("ERROR, Error sending part: " + result['result']['failed_parts'][0]['message'])
+            raise FuseOSError(EIO)
     
     def encodeRequest(self, method, param):
 	    request = {'jsonrpc': 2.0, 'id': 0, 'method': method, 'params': param}
 	    return json.dumps(request)
 
+    def createFile(self, path, parts):
+        if len(parts) <= 0:
+            logging.debug("ERROR, no parts in file")
+            raise FuseOSError(EIO)
+        else:
+            request = {'object_type': 'file'}
+            p = []
+            size = 0
+            for part in parts:
+                p.append({'fingerprint': part.fingerprint, 'offset': part.offset, 'size': part.size})
+                size += part.size
+
+            request['size'] = size
+            request['parts'] = p
+            
+            return self.updateObject('create', path, request)
+
+    def updateObject(self, action, path, meta):
+        meta['action'] = action
+        meta['path'] = path
+
+        result = self.post('update_objects', self.encodeRequest('update_objects', {"meta" : [meta]}), True);
+
     def hasPart(self, fingerprint, size, shareId = 0):
-	    request = {'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size}]}
-	    result = self.post('has_object_parts_v2', self.encodeRequest('has_object_parts_v2', request), True)
-	    if not 'needed_parts' in response['result']:	#Check that needed parts is empty
-	        return True
-	    else:
-	        part = response['result']['needed_parts'][0]
+        request = {'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size}]}
+        result = self.post('has_object_parts_v2', self.encodeRequest('has_object_parts_v2', request), True)
+        
+        
+        if len(result['result']['needed_parts']) <= 0 :	#Check that needed parts is empty
+            return True
+        else:
+            part = result['result']['needed_parts'][0]
             if ('message' in part and len(part['message']) > 0):
                 logging.debug("ERROR: Has Part, Error Message = " + part['message'])
                 raise FuseOSError(EIO)
