@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import Queue
+import logging
 class FileManager:
 
     def __init__ (self):
@@ -60,21 +61,21 @@ class CQueue:
 	    self.currentChunk = ""
 	
     def get(self):
-	    if self.q.empty():
-	        temp = ""
-	    else:
-	        self.currentChunk = self.q.get()
+	    self.currentChunk = self.q.get()
 
     def empty(self):
 	    return self.q.empty()
 
     def put(self, data):
-	    self.q.put(data)
+        try:
+            self.q.put(data, False)
+        except Queue.Full:
+            logging.debug('Putting in queue, it is full')
 
     def clear(self):
         while not self.q.empty():
             try:
                 q.get(False)
-            except Empty:
+            except Queue.Empty:
                 continue
 	        q.task_done()

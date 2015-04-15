@@ -66,11 +66,15 @@ class CopyFUSE(LoggingMixIn, Operations):
         while True:
             job = self.jobqueue.get()
             chunk = job['chunk']
-            logging.debug('In thread, getting chunk number = ' + str(chunk.chunk))
+            logging.debug('In thread, getting chunk number = ' + str(chunk.num))
+            
             self.buffer.put({'chunk': chunk, 'data': self.copy_api.getPart(chunk.fingerprint, chunk.size)})
+            logging.debug('Finished processing in thread chunk')
     
     def preRead(self, file, offset):
         crtchunknum = file.getChunkNumber(self.crtchunk, offset)
+        
+        logging.debug("Cuurent chunk it thinks i am in = " + str(crtchunknum) + ' and sjsls = ' + str(self.crtchunk))
         if crtchunknum == -1:
             logging.debug("ERROR, couldnt find chunk")
             raise FuseOSError(EIO)
@@ -79,7 +83,9 @@ class CopyFUSE(LoggingMixIn, Operations):
                 if crtchunknum == self.crtchunk+1:
                     self.crtchunk += 1
                     self.buffer.get()
-                    self.jobqueue.put({'chunk': file.chunks[self.crtchunk+2]})
+                    if self.crtchunk+2 < len(file.chunks):
+                        logging.debug("Putting on job queue, chunk number = " + str(self.crtchunk+2))
+                        self.jobqueue.put({'chunk': file.chunks[self.crtchunk+2]})
                 else:
                     self.crtchunk = crtchunknum
                     currentChunk = crtchunknum
@@ -102,23 +108,39 @@ class CopyFUSE(LoggingMixIn, Operations):
 
     def readData(self, file, offset, size, chunknum):
         chunk = self.buffer.currentChunk['chunk']
+        #logging.debug('Reading Chunk = ' + str(chunknum))
+        #logging.debug('chunk in queue head = ' + str(chunk.num))
+        if offset >= file.size:
+            return ""
+        logging.debug('Head chunk num = ' + str(chunk.num) + ' size = ' + str(chunk.size))
         if chunk.num != chunknum:
-            logging.debug('ERROR, reading wrong chunk')
+            logging.debug('ERROR,  reading wrong chunk reading = ' + str(chunk.num) + 'Expected =' + str(chunknum))
             raise FuseOSError(EIO)
         
         data = ""
         while int(chunk.offset) < int(offset) + int(size):
             if self.buffer.currentChunk['chunk'].num != self.crtchunk:
-                logging.debug('ERROR, reading wrong chunk')
+                logging.debug('ERROR, reading wrong chunk reading = ' + str(self.buffer.currentChunk['chunk'].num) + 'Exoected =' + str(self.crtchunk))
                 raise FuseOSError(EIO)
+            if chunknum == len(file.chunks)-1:  #last chunk
+                temp = file.size - offset
+                if temp == 0:
+                    return ""
+                elif temp <= size:
+                    size = temp
+            logging.debug('chunk o = ' + str(chunk.offset) + ' chunk size = ' + str(chunk.size) + ' offset = ' +str(offset) + ' shs = ' + str(size))
             if int(chunk.offset) <= int(offset) and int(chunk.offset)+int(chunk.size) > int(offset)+int(size):
+                logging.debug('case1')
                 data += self.buffer.currentChunk['data'][(int(offset)-int(chunk.offset)):(int(offset)-int(chunk.offset)+int(size))]
             elif int(chunk.offset) <= int(offset) and int(chunk.offset)+int(chunk.size) <= int(offset)+int(size):
+                logging.debug('case2')
                 data += self.buffer.currentChunk['data'][int(offset)-int(chunk.offset):]    
-                self.buffer.get()
                 self.crtchunk += 1
-                logging.debug("Putting on job queue, chunk number = " + str(self.crtchunk+2))
-                self.jobqueue.put({'chunk': file.chunks[self.crtchunk+2]})
+                if self.crtchunk < len(file.chunks):
+                    self.buffer.get()
+                if self.crtchunk+2 < len(file.chunks):
+                    logging.debug("Putting on job queue, chunk number = " + str(self.crtchunk+2))
+                    self.jobqueue.put({'chunk': file.chunks[self.crtchunk+2]})
             else:
                 data += self.buffer.currentChunk['data'][:int(offset)+int(size)-int(chunk.offset)]
             chunknum += 1
@@ -126,7 +148,7 @@ class CopyFUSE(LoggingMixIn, Operations):
                 chunk = file.chunks[chunknum]
             else:
                 if len(data) != int(size):
-                    logging.debug('ERROR, data length and size requested not same length')
+                    logging.debug('ERROR, data length = ' + str(len(data)) + ' and size requested = '+ str(len(size)))
                     raise FuseOSError(EIO)
                 else:
                     return data
@@ -166,6 +188,7 @@ class CopyFUSE(LoggingMixIn, Operations):
             st['st_ctime'] = st['st_atime'] = st['st_mtime'] = time.time()
         else:
             if file.type  == 'file':
+                logging.debug('file size = ' + str(int(file.size)))
                 st = dict(st_mode=(S_IFREG | 0644), st_size=int(file.size))
             else:
                 st = dict(st_mode=(S_IFDIR | 0755), st_nlink=2)
@@ -204,6 +227,7 @@ class CopyFUSE(LoggingMixIn, Operations):
                 raise FuseOSError(EIO)
         if len(file.chunks) <= 0:
             file.chunks = self.getParts(path)
+        logging.debug('Size of file = ' + str(file.size))
         return 0
 
     def flush(self, path, fh):
@@ -223,7 +247,7 @@ class CopyFUSE(LoggingMixIn, Operations):
         #self.file_close(path)
 
     def read(self, path, size, offset, fh):
-        logging.debug("Start Read")
+        logging.debug("Start Read, size = " + str(size) + ' offset = '+ str(offset))
         if self.crtchunk == -10:
             t = Thread(target=self.getBufferParts)
             t.deamon = True
@@ -234,14 +258,17 @@ class CopyFUSE(LoggingMixIn, Operations):
             raise FuseOSError(EIO)
         else:
             self.preRead(file, offset)
-            return self.readData(file, offset, size, self.crtchunk)
+            logging.debug("End Read1")
+            data = self.readData(file, offset, size, self.crtchunk)
+            logging.debug("End Read2")
+            return data
         #logging.debug("Reading File, Path = " + path)
         #logging.debug("Reasing File, size = " + str(size))
         #logging.debug("Reading File, Ofafset = " + str(offset))
         #self.rwlock.acquire()
         #data = self.copy_api.makeAvailableForRead(path, size, offset)
         #self.rwlock.release()
-        #logging.debug("End Read")
+        logging.debug("End Read")
         return 0
 	
     def readdir(self, path, fh):

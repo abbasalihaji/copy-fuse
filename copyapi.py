@@ -19,8 +19,8 @@ class CopyAPI:
     def __init__(self, username, password):
         logging.basicConfig(filename='/var/lib/plexmediaserver/Library/api.log', filemode='w', level=logging.DEBUG)
         #logging.basicConfig(filename='/var/lib/plexmediaserver/Library/cfuse.log', filemode='w')
-        logging.debug("starting Program")
-        self.httpconn = urllib3.connection_from_url("https://api.copy.com", block=True, maxsize=1)
+        #logging.debug("starting Program")
+        self.httpconn = urllib3.connection_from_url("https://api.copy.com", block=False, maxsize=1)
         self.login(username, password)
 
     def login(self, username, password):
@@ -37,13 +37,13 @@ class CopyAPI:
         list_watermark = 0
         ret = {}
         while True:
-            request = {'path': path, 'max_items': 100, 'list_watermark': list_watermark }
+            request = {'path': path, 'max_items': 10000, 'list_watermark': list_watermark }
             if(additionalOptions):
                 request.update(additionalOptions)
 	        result = self.post('list_objects', self.encodeRequest('list_objects', request), True)
             print result
             if 'children' in result['result'] and len(result['result']['children']) != 0:
-                logging.debug("Returning Children, No. of Children is  " + str(len(result['result']['children'])))
+                #logging.debug("Returning Children, No. of Children is  " + str(len(result['result']['children'])))
                 ret.update(result['result']['children'])
                 list_watermark = result['result']['list_watermark']
             else:
@@ -67,55 +67,55 @@ class CopyAPI:
         return result
 
     def getPart(self, fingerprint, size, shareId = 0): 
-	    request = {'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size}]}
+        request = {'parts': [{'share_id': shareId, 'fingerprint': fingerprint, 'size': size}]}
+        logging.debug('Get  Part')
+        result = self.post('get_object_parts_v2', self.encodeRequest('get_object_parts_v2', request))
+        logging.debug('part, after post')
+        null_offset = result.find(chr(0)) 
+        binary = result[null_offset+1:]
+        res = ""
+        if len(binary) > 0:
+            res = result[:null_offset]
+        else:
+            res = result
 
-	    result = self.post('get_object_parts_v2', self.encodeRequest('get_object_parts_v2', request))
+        if len(res) <= 0:
+            logging.debug("ERROR getting part data")
+            raise FuseOSError(EIO)
 	
-	    null_offset = result.find(chr(0)) 
-	    binary = result[null_offset+1:]
-
-	    res = ""
-	    if len(binary) > 0:
-	        res = result[:null_offset]
-	    else:
-	        res = result
-
-	    if len(res) <= 0:
-	        logging.debug("Error getting part data")
-	        raise FuseOSError(EIO)
+        result = json.loads(res)
 	
-	    result = json.loads(res)
+        if 'error' in result:
+            logging.debug('ERROR Getting Part')
+            raise FuseOSError(EIO)
 	
-	    if 'error' in result:
-	        logging.debug('Error Getting Part')
-	        raise FuseOSError(EIO)
+        if 'message' in result['result']['parts'][0]:
+            logging.debug('ERROR Getting Part. Error message = ' + result['result']['parts'][0]['message'])
+            raise FuseOSError(EIO)
 	
-	    if 'message' in result['result']['parts'][0]:
-	        logging.debug('Error Getting Part. Error message = ' + result['result']['parts'][0]['message'])
-	        raise FuseOSError(EIO)
-	
-	    if len(binary) != int(size):
-	        logging.debug('Error getting part data. Expected size = ' + str(len(size)) + ' and size of data received = ' + str(len(binary)))
-	        raise FuseOSError(EIO)
-
-	    return binary
+        if len(binary) != int(size):
+            logging.debug('ERROR getting part data. Expected size = ' + str(len(size)) + ' and size of data received = ' + str(len(binary)))
+            raise FuseOSError(EIO)
+        
+        logging.debug("End Get Part")
+        return binary
 
     def fingerprint(self, data):
-	    return hashlib.md5(data).hexdigest() + hashlib.sha1(data).hexdigest()
+        return hashlib.md5(data).hexdigest() + hashlib.sha1(data).hexdigest()
 
     def sendData(self, data, shareId = 0):
-	    fingerprint = self.fingerprint(data)
-	    part_size = len(data)
-	    if not self.hasPart(fingerprint, part_size, shareId):
-	        self.sendPart(fingerprint, part_size, data, shareId)
+        fingerprint = self.fingerprint(data)
+        part_size = len(data)
+        if not self.hasPart(fingerprint, part_size, shareId):
+            self.sendPart(fingerprint, part_size, data, shareId)
 
-	    return {'fingerprint': fingerprint, 'size': part_size}
+        return {'fingerprint': fingerprint, 'size': part_size}
 
     def post(self, method, data, decodeResponse = False):
         headers = self.getHeaders(method)
 
         result = self.httpconn.urlopen("POST", self.getEndPoint(method), data, headers)
-        logging.debug("Post method = " + method + "Post result " + result.data)
+        
         if decodeResponse:
             return json.loads(result.data, 'latin-1')
         else:
